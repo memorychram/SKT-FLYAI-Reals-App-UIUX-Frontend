@@ -69,7 +69,7 @@
 
 ```bash
 # 요구: Node 20+, npm, Expo Go 또는 EAS dev client (Android)
-git clone https://github.com/memorycharm/reals-shortform-app-client
+git clone https://github.com/memorychram/reals-shortform-app-client
 cd reals-shortform-app-client
 npm install
 
