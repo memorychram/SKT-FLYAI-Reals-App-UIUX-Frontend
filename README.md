@@ -9,7 +9,7 @@
 > **Reals(리얼스)** — 40~60대 소상공인 사장님이 AI의 도움으로 숏폼(릴스/쇼츠)을
 > **기획 → 촬영 → 편집 → 게시**까지 혼자 끝내는 모바일 앱.
 > 이 저장소는 그 앱의 **클라이언트(React Native / Expo)** 와 **UI/UX 설계 산출물**을 담은 개인 쇼케이스입니다.
-> 팀 전체 시스템(AI 서버 · 백엔드)은 [`reals-ai-shortform-platform-archive`](../reals-ai-shortform-platform-archive) 참고.
+> 팀 전체 시스템(AI 서버 · 백엔드)은 [`SKT-FLYAI-Reals-Fullstack-Archive`](../SKT-FLYAI-Reals-Fullstack-Archive) 참고.
 
 ---
 
@@ -69,8 +69,8 @@
 
 ```bash
 # 요구: Node 20+, npm, Expo Go 또는 EAS dev client (Android)
-git clone https://github.com/memorychram/reals-shortform-app-client
-cd reals-shortform-app-client
+git clone https://github.com/memorychram/SKT-FLYAI-Reals-App-UIUX-Frontend
+cd SKT-FLYAI-Reals-App-UIUX-Frontend
 npm install
 
 # 서버 없이 UI 검증 (전 도메인 mock)
