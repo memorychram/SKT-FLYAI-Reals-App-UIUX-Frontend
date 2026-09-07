@@ -1,0 +1,452 @@
+/**
+ * RenderScreen — **시안 V4 `editing` 대조 이식** (2026-08-26). 명세 14.1, 14.2.
+ *
+ * 시안 구조 (위에서부터, 이게 전부입니다)
+ *   화면    앱바 없음 · bg-canvas · px-6(24) pt-6(24)
+ *   ①      "AI 자동 편집" 18·bold + mt-1 "촬영본을 숏폼으로 만드는 중이에요." 14·slate
+ *   ②      mt-6 미리보기 상자 — w190 · 9:16 · rounded-2xl · border hairline · bg-hairline
+ *          가운데 "촬영된 영상" 13·medium·slate
+ *          단계가 지나가면 그 단계가 넣는 것이 상자 위에 나타납니다(자막 칩 → 위치 칩)
+ *   ③      mt-7(28) gap-2.5(10) 단계 목록 — 아이콘 22 + 라벨 15·semibold
+ *            끝난 것 circle-check #10b981 / 하는 중 loader-circle #2563eb **회전** /
+ *            남은 것 circle #cbd5e1 + 라벨 slate
+ *   ④      mt-auto pb-8 — 편집 중에는 회색(track) "편집 중..." 비활성,
+ *          끝나면 브랜드색 "완성된 영상 내보내기"
+ *
+ * ⚠️ "어디에 올리실 거예요?"(플랫폼 선택)를 **지웠습니다** (2026-08-26 확인).
+ *    시안은 촬영이 끝나면 곧바로 편집이 돌아갑니다. 올릴 곳은 나중에
+ *    내보내기(15.1 OutputsScreen)에서 고르므로 여기서 또 물을 이유가 없습니다.
+ *    14.1 이 요구하는 target_platform 은 인스타그램으로 보냅니다 — 자막을 화면
+ *    가운데로 올리는 쪽이라 유튜브에 올려도 UI 에 가리지 않습니다(그 반대는 가립니다).
+ *    EditResultScreen 의 재렌더도 원래 이 값으로 넘어옵니다.
+ *
+ * ⚠️ 다 되면 **자동으로 넘어가지 않습니다**. 시안대로 버튼을 눌러야 넘어갑니다.
+ *    편집이 끝나는 순간 화면이 혼자 바뀌면 사장님은 뭘 눌렀는지도 모른 채
+ *    다음 화면에 가 있습니다.
+ *
+ * ⚠️ 하단 안전영역을 **두 번 먹던 것을 고쳤습니다** (2026-08-26, 비교 이미지 측정).
+ *    시안 대비 버튼만 34 만큼 위에 떠 있었습니다. Screen 은 footer 가 없으면
+ *    edges 가 ['top','bottom'] 이라 SafeAreaView 가 하단 inset(기기 34)을 먹는데,
+ *    그 안에서 pb-8(32)을 또 줘서 시안 32 자리에 66 이 들어가 있었습니다.
+ *    이 화면은 버튼이 footer 가 아니라 본문 흐름(mt-auto)에 있어 BottomAction 을
+ *    쓸 수 없으므로, edges 를 ['top'] 으로 내리고 여백을 여기서 직접 잡습니다.
+ *    (측정: 시안 버튼 위 여백 258px @2x, 앱 202px → 차이 28 design px + 버튼 위치 6px)
+ */
+import React, { useEffect, useRef, useState } from 'react';
+import { Animated, AppState, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Circle, CircleCheck, TriangleAlert } from 'lucide-react-native';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp, NativeStackScreenProps } from '@react-navigation/native-stack';
+
+import { Button } from '../../../ui/Button';
+import { EditProblem } from '../components/EditProblem';
+import { EditLoadingArt } from '../components/EditLoadingArt';
+import { Screen } from '../../../ui/Screen';
+import { Spinner, StateBlock } from '../../../ui/Feedback';
+import theme, { color, radius, space, text } from '../../../design/theme';
+import { useEditResult, useStartEdit } from '../../../api/queries/edit';
+import { useDraft } from '../../../api/queries/project';
+import { useStore } from '../../../api/queries/store';
+import { useAppState } from '../../../lib/appState';
+import { ApiError } from '../../../api/http';
+import type { IncompleteTask, TargetPlatform } from '../../../api/schema/types';
+import type { CreateStackParamList, RootStackParamList } from '../../../navigation/types';
+
+type Props = NativeStackScreenProps<CreateStackParamList, 'Render'>;
+
+/**
+ * 시안 STEPS 원문. 자막이 없는 안무 촬영도 자막 단계는 그대로 지나갑니다.
+ *
+ * 2026-08-31 지시로 **"컷 사이 효과 삽입"** 을 컷 편집 바로 아래에 넣었습니다 —
+ * 온보딩 04 화면이 알려 주는 다섯 단계와 이제 같은 목록입니다.
+ * 줄 모양(체크·스피너·빈 원)과 진행 애니메이션은 아래 `STEPS.map` 이 **한 벌로**
+ * 그리므로, 목록에 넣기만 하면 위아래 줄과 똑같이 움직입니다.
+ * (진행도도 `percent * STEPS.length` 라 개수에 자동으로 맞습니다)
+ */
+const STEPS = [
+  '컷 편집',
+  '컷 사이 효과 삽입',
+  '자막 입히기',
+  '위치 태그 · 매장 브랜딩 삽입',
+  '최종 렌더링',
+];
+
+/**
+ * 자막을 화면 가운데로 올리는 규격. 어느 쪽에 올려도 UI 에 안 가립니다.
+ * 사장님께 묻지 않고 우리가 정하는 값이라 이유를 남겨 둡니다.
+ */
+const RENDER_PLATFORM: TargetPlatform = 'INSTAGRAM';
+
+/**
+ * 렌더가 끝나지 않을 때를 대비한 상한 — **15분**입니다 (2026-08-26, 사장님 지시).
+ *
+ * 진행률(14.2)은 1초마다 조회하고, 상태가 PENDING·PROCESSING 인 동안만 돕니다
+ * (`api/queries/edit.ts`). 이 상한은 그 조회와 별개로 **화면에 들어온 순간부터
+ * 벽시계**를 재는 것입니다 — "이만큼 응답이 없으면" 이 아니라, 진행률이 잘
+ * 올라오고 있어도 시간이 다 되면 실패 화면으로 넘깁니다.
+ *
+ * 처음에는 3분이었습니다. 실제 렌더가 얼마나 걸리는지 실측치가 없이 잡은 값이라,
+ * 서버가 그보다 오래 걸리면 **멀쩡히 만들어지고 있는 영상을 "실패" 로** 보여주게
+ * 됩니다. AI 렌더는 몇 분씩 걸리는 게 보통이라 넉넉하게 15분으로 올렸습니다.
+ *
+ * ⚠️ 이 값은 "여기서 더 기다려도 소용없다" 는 선일 뿐, 성능 목표가 아닙니다.
+ *    실서버 렌더 시간이 측정되면 그 값에 맞춰 다시 조이세요
+ *    (지금은 7.1 기획 생성이 500 이라 촬영→편집까지 못 가서 측정이 막혀 있습니다).
+ */
+const TIMEOUT_MS = 900000;
+
+
+export default function RenderScreen({ navigation, route }: Props) {
+  const { projectId, platform } = route.params;
+  const rootNav = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+  const insets = useSafeAreaInsets();
+  const storeId = useAppState((s) => s.storeId);
+  const { data: store } = useStore(storeId ?? undefined);
+
+  const startEdit = useStartEdit(projectId);
+  const [timedOut, setTimedOut] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 편집을 건 시각. 백그라운드에 다녀와도 이 값으로 판정합니다. */
+  const startedAt = useRef<number | null>(null);
+
+  /**
+   * 🔴 2026-08-26 — 화면에 들어올 때마다 편집을 **다시 걸던 것**
+   *
+   * 예전에는 마운트되자마자 무조건 14.1 을 불렀습니다. 사장님이 편집 화면을 벗어났다
+   * 돌아오면 그때마다 렌더가 새로 걸립니다. 앞으로 편집이 10분씩 걸리고 "앱을 꺼도
+   * 된다" 가 되면, 돌아오는 일이 잦아져 같은 프로젝트를 몇 번씩 렌더하게 됩니다.
+   *
+   * 그래서 **먼저 물어보고 없을 때만 겁니다.**
+   *   14.2 에 결과가 있고 PENDING·PROCESSING·COMPLETED  → 그대로 붙습니다(다시 안 걸어요)
+   *   결과가 없거나(404) FAILED                          → 그때 새로 겁니다
+   *
+   * ⚠️ 서버가 "이미 도는 중인데 또 부르면" 어떻게 하는지는 아직 답을 못 받았습니다
+   *    (BE_전달사항 §2-4). 답이 오기 전까지는 프론트에서 안 부르는 쪽으로 막아 둡니다.
+   */
+  const editResult = useEditResult(projectId);
+  /** 시간 초과 화면의 "마지막 자동 저장" 시각 (9.3). 없으면 그 줄을 다르게 씁니다. */
+  const draft = useDraft(projectId);
+  const result = editResult.data;
+  /** 이 화면에서 우리가 편집을 걸었는지 (상한 타이머를 걸 시점 판단용) */
+  const [started, setStarted] = useState(false);
+  const decided = useRef(false);
+
+  useEffect(() => {
+    if (decided.current) return;
+    // 아직 물어보는 중이면 기다립니다 — 모르는 채로 걸면 중복이 됩니다.
+    if (editResult.isLoading) return;
+
+    const s = result?.renderStatus;
+    if (s === 'PENDING' || s === 'PROCESSING' || s === 'COMPLETED') {
+      // 이미 돌고 있거나 끝났습니다. 붙기만 합니다.
+      decided.current = true;
+      setStarted(true);
+      armTimeout();
+      return;
+    }
+    /**
+     * 🔴 **실패·부족 상태에서는 자동으로 다시 걸지 않습니다** (2026-08-27).
+     *
+     * 여기가 예전에는 무조건 `begin()` 이었습니다. 그래서 마지막 렌더가 실패한
+     * 프로젝트는 **편집 화면에 들어가기만 해도 새 편집이 걸렸습니다.** 사장님이
+     * 아무것도 안 눌러도, 들어갔다 나왔다 세 번이면 AI 런이 세 개입니다.
+     *
+     * 편집 한 번은 **실제 요금**입니다. AI 레포를 열어 보니 한 런이 최대 네 번
+     * LLM 을 부르고(`editing_max_repair_attempts=2` + SOURCE_GAP 축소구조 재시도),
+     * 멈춘 런은 15~20분마다 서버가 알아서 다시 돌립니다(상한 없음).
+     * 하루 $18 이 그렇게 나왔습니다 — 자세한 건 `AI_전달사항.md`.
+     *
+     * 이제 실패 화면을 보여주고, **사장님이 "다시 시도" 를 누를 때만** 겁니다.
+     */
+    if (s === 'FAILED' || s === 'SOURCE_GAP') {
+      decided.current = true;
+      setStarted(true);
+      return;
+    }
+    decided.current = true;
+    begin();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editResult.isLoading, result?.renderStatus]);
+
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    []
+  );
+
+  /**
+   * 앱으로 **돌아왔을 때** 두 가지를 합니다.
+   *   ① 벽시계로 15분이 지났는지 다시 봅니다 (위 armTimeout 머리말)
+   *   ② 진행 상황을 곧바로 새로 받습니다 — 백그라운드에서는 폴링이 멈춰 있어서
+   *      돌아온 직후 화면이 옛 진행률을 보여주다가 뒤늦게 바뀝니다.
+   *
+   * **렌더 자체는 서버가 합니다.** 앱을 내려놔도, 꺼도 계속 만들어집니다.
+   * 다 되면 서버가 푸시로 알려주고(1.6 토큰 등록 · `lib/push.ts`), 그 알림을 누르면
+   * 완성 화면으로 들어옵니다. 이 화면을 붙잡고 있을 필요가 없습니다.
+   */
+  const refetchRef = useRef(editResult.refetch);
+  refetchRef.current = editResult.refetch;
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
+      checkElapsed();
+      void refetchRef.current();
+    });
+    return () => sub.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * 끝났으면 상한 타이머를 끕니다 (2026-08-26).
+   *
+   * ⚠️ 이게 없으면 **완성된 화면이 상한 시각에 실패 화면으로 뒤집힙니다.**
+   *    렌더가 40초에 끝나도 이 화면은 자동으로 넘어가지 않고 "숏폼이 완성됐어요" 로
+   *    기다립니다. 사장님이 바로 안 누르고 상한(TIMEOUT_MS)이 지나면 타이머가 터져
+   *    `timedOut` 이 켜지고, 아래 `failed` 가 참이 되어 실패 화면이 뜹니다.
+   *    다 만들어 놓고 실패했다고 말하는 셈입니다.
+   */
+  const renderStatus = result?.renderStatus;
+  useEffect(() => {
+    if (renderStatus !== 'COMPLETED' && renderStatus !== 'FAILED') return;
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+  }, [renderStatus]);
+
+  /**
+   * 상한 타이머를 겁니다.
+   *
+   * 🔴 **`setTimeout` 만 믿으면 안 됩니다** (2026-08-27).
+   *    편집은 5분 넘게 걸리는 일이라 사장님이 앱을 내려놓고 다른 걸 하십니다. 그동안
+   *    안드로이드는 JS 타이머를 늦추거나 아예 멈춥니다 — 돌아왔을 때 15분이 지났는데도
+   *    타이머가 안 터져 있거나, 반대로 한참 뒤에 몰아서 터집니다.
+   *    그래서 **시작 시각을 적어 두고 벽시계로 판정**합니다. 타이머는 화면을 보고 있을 때
+   *    바로 반응하라고 함께 걸어 두는 보조 장치입니다.
+   */
+  function armTimeout() {
+    startedAt.current = Date.now();
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setTimedOut(true), TIMEOUT_MS);
+  }
+
+  /** 시작한 지 15분이 지났는지 **벽시계로** 확인합니다. */
+  function checkElapsed() {
+    if (startedAt.current && Date.now() - startedAt.current >= TIMEOUT_MS) setTimedOut(true);
+  }
+
+  function begin() {
+    setTimedOut(false);
+    setStarted(true);
+    startEdit.mutate(platform ?? RENDER_PLATFORM);
+    armTimeout();
+  }
+
+  /**
+   * 명세 14.1: 촬영본이 빈 태스크가 있으면 400 TASKS_INCOMPLETE.
+   * 어떤 장면인지 서버가 알려주므로 그대로 보여주고 촬영 목록으로 안내합니다.
+   */
+  const err = startEdit.error;
+  const incomplete =
+    err instanceof ApiError && err.code === 'TASKS_INCOMPLETE'
+      ? ((err.detail?.incompleteTasks as IncompleteTask[] | undefined) ?? [])
+      : null;
+
+  const done = result?.renderStatus === 'COMPLETED';
+  // 이미 완성됐으면 상한에 걸려도 실패가 아닙니다 (위 타이머 정리와 짝입니다).
+  /** 서버가 실패를 통보한 경우 — 기다려도 안 됩니다. */
+  const serverFailed = result?.renderStatus === 'FAILED' || startEdit.isError;
+  const failed = serverFailed || (timedOut && !done);
+  const percent = (result?.progressPercent ?? 0) / 100;
+  /** 지금 돌고 있는 단계. 다 끝나면 목록 전체가 체크로 바뀝니다. */
+  const stepIndex = done ? STEPS.length : Math.min(STEPS.length - 1, Math.floor(percent * STEPS.length));
+
+  // ── 막혔을 때 ────────────────────────────────────────
+  /*
+    갈래가 셋입니다. **앞의 둘은 서로 다른 화면**입니다 (2026-08-27 시안 2종).
+
+      ① 아직 안 찍은 컷이 있음 (400 TASKS_INCOMPLETE)  → 촬영으로 안내
+      ② 15분이 지나도 안 끝남                          → "편집 시간 초과"
+      ③ 서버가 FAILED 를 줌 (편집 자체가 안 됨)          → "편집을 완료할 수 없습니다"
+
+    예전에는 ②·③ 을 "편집을 끝내지 못했어요" 한 화면으로 뭉쳐 놓았습니다. 둘은 사장님이
+    해야 할 일이 다릅니다 — ②는 **기다리면 될 수도** 있고(서버는 계속 돌고 있습니다),
+    ③은 **다시 걸어야** 합니다. 그래서 문구도 버튼도 갈랐습니다.
+  */
+  /**
+   * `SOURCE_GAP` — 촬영본이 모자라 편집을 끝내지 못한 경우.
+   *
+   * 서버가 부족한 장면을 알려주므로(`missing_scene_roles`) **TASKS_INCOMPLETE 와
+   * 같은 화면**으로 안내합니다 — 사장님이 할 일이 "더 찍기" 로 똑같습니다.
+   * 새 화면을 만들지 않고 아래 `incomplete` 갈래가 쓰는 StateBlock 을 그대로 씁니다.
+   *
+   * ⚠️ 지금은 이 값이 오지 않습니다(AI 가 폴백으로 넘깁니다). 오는 순간 화면이
+   *    "편집 중" 에서 멈추기 때문에 미리 막아 두는 것입니다 — `types.ts` 의
+   *    RenderStatus 주석 참고.
+   */
+  if (renderStatus === 'SOURCE_GAP') {
+    const roles = result?.missingSceneRoles ?? [];
+    return (
+      <Screen scroll={false} padded={false} edges={['top']} contentStyle={{ paddingTop: 0, gap: 0 }}>
+        <View style={styles.failBody}>
+          <StateBlock
+            icon={TriangleAlert}
+            tone="brand"
+            title="촬영본이 조금 모자라요"
+            body={
+              roles.length > 0
+                ? `${roles.join(', ')} 장면을 더 찍으면 영상을 만들 수 있습니다.`
+                : '몇몇 장면이 부족해서 편집을 끝내지 못했어요. 촬영 목록을 확인해 주세요.'
+            }
+            primaryLabel="더 찍으러 가기"
+            onPrimary={() => navigation.replace('Camera', { projectId })}
+          />
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => rootNav.navigate('Main', { screen: 'HomeFeed' })}
+            style={styles.laterLink}
+          >
+            <Text style={styles.laterText}>나중에 하기</Text>
+          </Pressable>
+        </View>
+      </Screen>
+    );
+  }
+
+  if (incomplete) {
+    return (
+      <Screen scroll={false} padded={false} edges={['top']} contentStyle={{ paddingTop: 0, gap: 0 }}>
+        <View style={styles.failBody}>
+          {/* 망가진 게 아니라 아직 안 찍은 것이라 heart(빨강)가 아니라 brand 입니다 */}
+          <StateBlock
+            icon={TriangleAlert}
+            tone="brand"
+            title={`아직 안 찍은 장면이 ${incomplete.length}개 있습니다`}
+            body={
+              incomplete.length > 0
+                ? `${incomplete.map((t) => t.taskTitle).join(', ')}을(를) 찍으면 영상을 만들 수 있습니다.`
+                : '촬영 목록에서 남은 장면을 확인해 주세요.'
+            }
+            primaryLabel="남은 컷 찍으러 가기"
+            onPrimary={() => navigation.replace('Camera', { projectId })}
+          />
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => rootNav.navigate('Main', { screen: 'HomeFeed' })}
+            style={styles.laterLink}
+          >
+            <Text style={styles.laterText}>나중에 하기</Text>
+          </Pressable>
+        </View>
+      </Screen>
+    );
+  }
+
+  if (failed) {
+    return (
+      <EditProblem
+        kind={timedOut && !serverFailed ? 'timeout' : 'failed'}
+        savedAt={draft.data?.lastSavedAt}
+        onRetry={begin}
+        onHome={() => rootNav.navigate('Main', { screen: 'HomeFeed' })}
+      />
+    );
+  }
+
+  // ── 편집 진행 ────────────────────────────────────────
+  return (
+    <Screen scroll={false} padded={false} edges={['top']} contentStyle={{ paddingTop: 0, gap: 0 }}>
+      <View style={styles.body}>
+        {/* ① */}
+        <View style={styles.head}>
+          <Text style={text.heading}>AI 자동 편집</Text>
+          <Text style={styles.sub}>
+            {done ? '숏폼이 완성됐어요.' : '촬영본을 숏폼으로 만드는 중이에요.'}
+          </Text>
+        </View>
+
+        {/*
+          ② 편집 중 그림 (시안 9차).
+          8차까지는 "촬영된 영상" 회색 상자 + 자막칩·위치칩이었는데, 9차에서
+          **상자가 통째로 교체**됐습니다 — 칩들도 함께 사라집니다.
+          완성본이 아직 없는 자리라 예시를 얹어 두는 것보다 "지금 뭘 하는 중" 을
+          그림으로 말해 주는 편이 맞습니다 (EditLoadingArt 머리말).
+        */}
+        <EditLoadingArt done={done} />
+
+        {/* ③ 단계 */}
+        <View style={styles.steps}>
+          {STEPS.map((s, i) => {
+            const state = i < stepIndex ? 'done' : i === stepIndex ? 'loading' : 'todo';
+            return (
+              <View key={s} style={styles.stepRow}>
+                {state === 'done' ? (
+                  <CircleCheck size={22} strokeWidth={2} color={color.done[500]} />
+                ) : state === 'loading' ? (
+                  <Spinner size={22} />
+                ) : (
+                  <Circle size={22} strokeWidth={2} color={color.ink[300]} />
+                )}
+                <Text style={[styles.stepLabel, state === 'todo' && { color: color.ink[500] }]}>
+                  {s}
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+
+        {/* ④ 편집이 끝나야 넘어갑니다. */}
+        <View style={[styles.cta, { paddingBottom: Math.max(insets.bottom, space[8]) }]}>
+          <Button
+            label={done ? '완성된 영상 내보내기' : '편집 중...'}
+            disabled={!done}
+            onPress={() => navigation.replace('EditResult', { projectId })}
+          />
+        </View>
+      </View>
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  // 시안: px-6 pt-6
+  body: { flex: 1, paddingHorizontal: space[6], paddingTop: space[6] },
+
+  head: { gap: space[1] }, // 시안 mt-1
+  sub: { ...text.bodySmall, color: color.ink[500] },
+
+  // 시안: mx-auto mt-6 · w-[190px] · aspect-[9/16] · rounded-2xl · bg-hairline
+  steps: { marginTop: space[7], gap: 10 },
+  /*
+   * 시안 한 줄 높이는 24 입니다 — 아이콘 22 가 아니라 15px 글자의 줄높이가 잡습니다.
+   * 비워 두면 우리 bodyStrong 줄높이대로 23 이 되어 줄마다 1 씩, 네 줄에서 3 이
+   * 밀립니다 (비교 이미지 @2x 에서 단계 간격 시안 68 / 앱 66 으로 측정).
+   */
+  stepRow: { flexDirection: 'row', alignItems: 'center', gap: space[3], minHeight: 24 },
+  stepLabel: { ...theme.text.bodyStrong, flexShrink: 1 },
+
+  /*
+   * 시안: mt-auto pb-8(32).
+   * pb 는 인라인에서 max(안전영역, 32) 로 잡습니다 — Screen 이 edges=['top'] 이라
+   * 하단 inset 이 여기 말고는 갈 데가 없습니다. 기기에서는 34(제스처 바)라
+   * 시안보다 2 큽니다. 32 로 고정하면 홈 인디케이터에 버튼이 깔립니다.
+   */
+  cta: { marginTop: 'auto' },
+
+  // 시안 EditingFailed: justify-center · px-2(8) · pb-16(64)
+  failBody: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: space[2],
+    paddingBottom: space[16],
+  },
+  // 시안: mx-auto mt-6 py-2
+  laterLink: { alignSelf: 'center', marginTop: space[6], paddingVertical: space[2] },
+  laterText: {
+    ...text.caption,
+    color: color.ink[500],
+    textDecorationLine: 'underline',
+  },
+});
