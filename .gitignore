@@ -27,3 +27,6 @@ firebase-adminsdk*.json
 *serviceaccount*.json
 *-fcm-key.json
 fcm-*.json
+
+# personal showcase: real firebase config stays local
+google-services.json
